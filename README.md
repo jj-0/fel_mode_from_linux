@@ -5,6 +5,7 @@ Does not shut Linux down gracefully, so before running ensure your filesystems a
 Currently supported and tested:
 - A20
 - H3
+- A33/R16/Zuiki z7213
 
 Supported but not tested yet:
 - H5
