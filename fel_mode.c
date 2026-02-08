@@ -5,7 +5,12 @@
  * a watchdog reset to enter FEL mode.
  * Must be run as root.
  *
- * Supported SoCs: A20 (sun7i), H3 (sun8i)
+ * Supported SoCs:
+ *   A20        (sun7i,  0x1651)  - confirmed working
+ *   A33/R16    (sun8i,  0x1667)  - FEL addr from BROM source (bsp_for_a33)
+ *   H3/H2+    (sun8i,  0x1680)  - FEL addr from vendor u-boot (sun8iw7)
+ *   H5        (sun50i, 0x1718)  - same R_PRCM layout as H3
+ *   H6        (sun50i, 0x1728)  - RTC base at 0x07000000
  *
  * Usage: fel_mode [-r|--reboot]
  */
@@ -21,40 +26,68 @@
 
 /*
  * SoC identification register
+ * Set bit 15 to enable version readout, SoC ID is in upper 16 bits
  */
 #define SUNXI_SRAM_BASE      0x01C00000
-#define SUNXI_SRAM_VER_REG   0x24        /* Version register offset */
+#define SUNXI_SRAM_VER_REG   0x24
 
 /*
  * SoC IDs (from version register >> 16)
  */
-#define SOC_ID_A20           0x1651      /* sun7i */
-#define SOC_ID_H3            0x1680      /* sun8i */
+#define SOC_ID_A20           0x1651
+#define SOC_ID_A33           0x1667  /* also R16, Zuiki z7213 */
+#define SOC_ID_H3            0x1680  /* also H2+ */
+#define SOC_ID_H5            0x1718
+#define SOC_ID_H6            0x1728
 
 /*
- * FEL magic value
+ * FEL magic value - same for all supported SoCs
  */
 #define FEL_MAGIC            0x5AA5A55A
 
 /*
- * A20 (sun7i) memory map:
- * - Timer base:         0x01C20C00
- * - Watchdog:           0x01C20C90 (cfg at +0x00, mode at +0x04)
- * - FEL flag:           0x01C20D24 (Timer GP Register 1, offset 0x124 from timer base)
+ * FEL flag register addresses:
+ *
+ * A20:     Timer GP Register 1 at 0x01C20C00 + 0x124 = 0x01C20D24
+ *          (from BROM source bsp_for_a20/common/common.c)
+ *
+ * A33/R16: R_PRCM RTC GP Register at 0x01F00000 + 0x108 = 0x01F00108
+ *          (from BROM source bsp_for_a33/common/common.c)
+ *
+ * H3:      RTC GP Register 2 at 0x01F00000 + 0x100 + 2*4 = 0x01F00108
+ *          (from vendor u-boot arch-sun8iw7/cpu.h)
+ *
+ * H5:      Same R_PRCM layout as H3 = 0x01F00108
+ *
+ * H6:      RTC moved to 0x07000000, GP Register 2 = 0x07000108
  */
-#define A20_FEL_FLAG_REG     0x01C20D24
-#define A20_WDT_BASE         0x01C20C90
-#define A20_WDT_CFG          0x00
-#define A20_WDT_MODE         0x04
+#define FEL_ADDR_A20         0x01C20D24
+#define FEL_ADDR_R_PRCM      0x01F00108  /* A33, H3, H5 */
+#define FEL_ADDR_H6          0x07000108
 
 /*
- * H3 (sun8i) memory map:
- * - R_PRCM base:        0x01F00000
- * - FEL flag:           0x01F00108 (offset 0x108 from R_PRCM base)
- * - Watchdog:           0x01C20CB8 (mode register, different from A20)
+ * Watchdog registers:
+ *
+ * A20:      0x01C20C90 (cfg at +0x00, mode at +0x04)
+ *           cfg=1 (system reset), mode=3 (enable, 0.5s)
+ *
+ * A33/H3/H5: 0x01C20CB8 (mode register only)
+ *            mode=1 (enable reset)
+ *
+ * H6:      0x030090B8 (mode register only)
+ *          mode=1 (enable reset)
  */
-#define H3_FEL_FLAG_REG      0x01F00108
-#define H3_WDT_MODE          0x01C20CB8
+#define WDT_A20_BASE         0x01C20C90
+#define WDT_H3_MODE          0x01C20CB8
+#define WDT_H6_MODE          0x030090B8
+
+/*
+ * Watchdog types
+ */
+enum wdt_type {
+    WDT_TYPE_A20,   /* Separate cfg + mode registers */
+    WDT_TYPE_H3,    /* Single mode register, value 1 */
+};
 
 /*
  * SoC descriptor
@@ -64,23 +97,46 @@ struct soc_info {
     uint16_t id;
     uint32_t fel_flag_reg;
     uint32_t wdt_base;
-    int wdt_has_cfg;  /* A20 has separate cfg register, H3 doesn't */
+    enum wdt_type wdt_type;
 };
 
-static const struct soc_info soc_a20 = {
-    .name = "A20 (sun7i)",
-    .id = SOC_ID_A20,
-    .fel_flag_reg = A20_FEL_FLAG_REG,
-    .wdt_base = A20_WDT_BASE,
-    .wdt_has_cfg = 1,
-};
-
-static const struct soc_info soc_h3 = {
-    .name = "H3 (sun8i)",
-    .id = SOC_ID_H3,
-    .fel_flag_reg = H3_FEL_FLAG_REG,
-    .wdt_base = H3_WDT_MODE,
-    .wdt_has_cfg = 0,
+static const struct soc_info soc_table[] = {
+    {
+        .name = "A20 (sun7i)",
+        .id = SOC_ID_A20,
+        .fel_flag_reg = FEL_ADDR_A20,
+        .wdt_base = WDT_A20_BASE,
+        .wdt_type = WDT_TYPE_A20,
+    },
+    {
+        .name = "A33/R16 (sun8i)",
+        .id = SOC_ID_A33,
+        .fel_flag_reg = FEL_ADDR_R_PRCM,
+        .wdt_base = WDT_H3_MODE,
+        .wdt_type = WDT_TYPE_H3,
+    },
+    {
+        .name = "H3/H2+ (sun8i)",
+        .id = SOC_ID_H3,
+        .fel_flag_reg = FEL_ADDR_R_PRCM,
+        .wdt_base = WDT_H3_MODE,
+        .wdt_type = WDT_TYPE_H3,
+    },
+    {
+        .name = "H5 (sun50i)",
+        .id = SOC_ID_H5,
+        .fel_flag_reg = FEL_ADDR_R_PRCM,
+        .wdt_base = WDT_H3_MODE,
+        .wdt_type = WDT_TYPE_H3,
+    },
+    {
+        .name = "H6 (sun50i)",
+        .id = SOC_ID_H6,
+        .fel_flag_reg = FEL_ADDR_H6,
+        .wdt_base = WDT_H6_MODE,
+        .wdt_type = WDT_TYPE_H3,
+    },
+    { .name = NULL } /* sentinel */
 };
 
 /* Memory barrier macros for ARM */
@@ -126,6 +182,7 @@ static const struct soc_info *detect_soc(int fd)
     void *sram_base;
     off_t offset;
     uint32_t ver_reg, soc_id;
+    const struct soc_info *soc;
 
     sram_base = map_physical(fd, SUNXI_SRAM_BASE, 0x100, &offset);
     if (sram_base == MAP_FAILED) {
@@ -151,16 +208,17 @@ static const struct soc_info *detect_soc(int fd)
 
     printf("Detected SoC ID: 0x%04X\n", soc_id);
 
-    switch (soc_id) {
-    case SOC_ID_A20:
-        return &soc_a20;
-    case SOC_ID_H3:
-        return &soc_h3;
-    default:
-        fprintf(stderr, "Unsupported SoC ID: 0x%04X\n", soc_id);
-        fprintf(stderr, "Supported SoCs: A20 (0x1651), H3 (0x1680)\n");
-        return NULL;
+    for (soc = soc_table; soc->name; soc++) {
+        if (soc->id == soc_id)
+            return soc;
     }
+
+    fprintf(stderr, "Unsupported SoC ID: 0x%04X\n", soc_id);
+    fprintf(stderr, "Supported SoCs:");
+    for (soc = soc_table; soc->name; soc++)
+        fprintf(stderr, " %s (0x%04X)", soc->name, soc->id);
+    fprintf(stderr, "\n");
+    return NULL;
 }
 
 static void trigger_watchdog_reset(int fd, const struct soc_info *soc)
@@ -176,18 +234,16 @@ static void trigger_watchdog_reset(int fd, const struct soc_info *soc)
 
     printf("Triggering watchdog reset...\n");
 
-    if (soc->wdt_has_cfg) {
-        /* A20 style: separate cfg and mode registers */
-        volatile uint32_t *wdt_cfg = (volatile uint32_t *)((char *)wdt_base + offset + A20_WDT_CFG);
-        volatile uint32_t *wdt_mode = (volatile uint32_t *)((char *)wdt_base + offset + A20_WDT_MODE);
-
-        writel(1, wdt_cfg);   /* Reset whole system */
-        writel(3, wdt_mode);  /* Enable watchdog, 0.5s interval */
-    } else {
-        /* H3 style: single mode register */
-        volatile uint32_t *wdt_mode = (volatile uint32_t *)((char *)wdt_base + offset);
-
-        writel(1, wdt_mode);  /* Enable watchdog reset */
+    switch (soc->wdt_type) {
+    case WDT_TYPE_A20:
+        /* A20: separate cfg and mode registers at base+0x00 and base+0x04 */
+        writel(1, (volatile uint32_t *)((char *)wdt_base + offset + 0x00)); /* cfg: system reset */
+        writel(3, (volatile uint32_t *)((char *)wdt_base + offset + 0x04)); /* mode: enable, 0.5s */
+        break;
+    case WDT_TYPE_H3:
+        /* H3/A33/H5/H6: single mode register */
+        writel(1, (volatile uint32_t *)((char *)wdt_base + offset));
+        break;
     }
 
     munmap(wdt_base, 0x10 + offset);
@@ -210,9 +266,12 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printf("Usage: %s [-r|--reboot]\n", argv[0]);
             printf("  -r, --reboot  Trigger watchdog reset after writing FEL magic\n");
-            printf("\nThis tool writes the FEL magic value to the appropriate register\n");
-            printf("and optionally triggers a watchdog reset to enter FEL mode.\n");
-            printf("\nSupported SoCs: A20 (sun7i), H3 (sun8i)\n");
+            printf("\nWrites the FEL magic value to the appropriate register and\n");
+            printf("optionally triggers a watchdog reset to enter FEL mode.\n");
+            printf("\nSupported SoCs:\n");
+            for (const struct soc_info *s = soc_table; s->name; s++)
+                printf("  %-20s (0x%04X)  FEL flag at 0x%08X\n",
+                       s->name, s->id, s->fel_flag_reg);
             return 0;
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
