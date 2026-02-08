@@ -2,8 +2,12 @@
 Jump directly to FEL mode from Linux on supported Allwinner SoCs.
 Does not shut Linux down gracefully, so before running ensure your filesystems are sync'd, umounted, mounted read-only.
 
-Currently supported:
+Currently supported and tested:
 - A20
 - H3
+
+Supported but not tested yet:
+- H5
+- H6
 
 Created using Claude Code
